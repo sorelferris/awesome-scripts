@@ -1,40 +1,87 @@
 #!/bin/bash
 
-# ===== Interactive Input =====
-read -p "Enter Master node IP: " MASTER_IP
-read -p "Enter Master node token: " MASTER_TOKEN
-read -p "Enter Worker node IP: " WORKER_IP
+# ===== Function for interactive menu using arrow keys =====
+select_node_type() {
+  OPTIONS=("Master" "Worker")
+  INDEX=0
 
-# ===== Check Network Connectivity =====
-echo "[INFO] Checking network connectivity to Master node..."
-if nc -zv "$MASTER_IP" 6443 2>/dev/null; then
-    echo "[INFO] Master API Server port 6443 is reachable"
+  while true; do
+    clear
+    echo "Select node type to install:"
+    for i in "${!OPTIONS[@]}"; do
+      if [ $i -eq $INDEX ]; then
+        echo "> ${OPTIONS[$i]}"
+      else
+        echo "  ${OPTIONS[$i]}"
+      fi
+    done
+
+    # Read user input
+    read -rsn1 input
+    if [[ $input == $'\x1b' ]]; then
+      read -rsn2 -t 0.1 input
+      if [[ $input == "[A" ]]; then
+        ((INDEX--))
+        ((INDEX<0)) && INDEX=$((${#OPTIONS[@]}-1))
+      elif [[ $input == "[B" ]]; then
+        ((INDEX++))
+        ((INDEX>=${#OPTIONS[@]})) && INDEX=0
+      fi
+    elif [[ $input == "" ]]; then
+      echo ${OPTIONS[$INDEX]}
+      return
+    fi
+  done
+}
+
+# ===== Choose Node Type =====
+NODE_TYPE=$(select_node_type)
+
+# ===== Common Inputs =====
+read -p "Enter node IP: " NODE_IP
+
+if [ "$NODE_TYPE" == "Master" ]; then
+    # ===== Master Node Installation =====
+    read -p "Enter K3S node token (optional, press Enter to generate automatically): " MASTER_TOKEN
+    echo "[INFO] Installing k3s master..."
+    curl -sfL https://get.k3s.io | sh -
+
+    echo "[INFO] Master node installed. Check status with: sudo k3s kubectl get nodes"
+
+elif [ "$NODE_TYPE" == "Worker" ]; then
+    # ===== Worker Node Installation =====
+    read -p "Enter Master node IP: " MASTER_IP
+    read -p "Enter Master node token: " MASTER_TOKEN
+
+    echo "[INFO] Checking network connectivity to Master node..."
+    if nc -zv "$MASTER_IP" 6443 2>/dev/null; then
+        echo "[INFO] Master API Server port 6443 is reachable"
+    else
+        echo "[ERROR] Cannot reach Master API Server port 6443. Check network, firewall, or port settings"
+        exit 1
+    fi
+
+    echo "[INFO] Uninstalling old k3s-agent (if exists)..."
+    sudo /usr/local/bin/k3s-agent-uninstall.sh 2>/dev/null || true
+    sudo rm -rf /etc/rancher/k3s /var/lib/rancher/k3s
+
+    echo "[INFO] Installing k3s-agent..."
+    curl -sfL https://get.k3s.io | \
+      K3S_URL="https://${MASTER_IP}:6443" \
+      K3S_TOKEN="${MASTER_TOKEN}" \
+      INSTALL_K3S_AGENT=1 \
+      INSTALL_K3S_EXEC="--node-ip ${NODE_IP}" \
+      sh -
+
+    echo "[INFO] Enabling and starting k3s-agent service..."
+    sudo systemctl daemon-reload
+    sudo systemctl enable k3s-agent
+    sudo systemctl restart k3s-agent
+    sudo systemctl status k3s-agent --no-pager
+
+    echo "[INFO] On Master node run: sudo k3s kubectl get nodes"
+
 else
-    echo "[ERROR] Cannot reach Master API Server port 6443. Check network, firewall, or port settings"
+    echo "[ERROR] Invalid choice. Exiting."
     exit 1
 fi
-
-# ===== Uninstall Old k3s-agent =====
-echo "[INFO] Uninstalling old k3s-agent (if exists)..."
-sudo /usr/local/bin/k3s-agent-uninstall.sh 2>/dev/null || true
-sudo rm -rf /etc/rancher/k3s /var/lib/rancher/k3s
-
-# ===== Install k3s-agent =====
-echo "[INFO] Installing k3s-agent..."
-curl -sfL https://get.k3s.io | \
-  K3S_URL="https://${MASTER_IP}:6443" \
-  K3S_TOKEN="${MASTER_TOKEN}" \
-  INSTALL_K3S_AGENT=1 \
-  INSTALL_K3S_EXEC="--node-ip ${WORKER_IP} --insecure-skip-tls-verify" \
-  sh -
-
-# ===== Start and Enable Service =====
-echo "[INFO] Enabling and starting k3s-agent service..."
-sudo systemctl daemon-reload
-sudo systemctl enable k3s-agent
-sudo systemctl restart k3s-agent
-sudo systemctl status k3s-agent --no-pager
-
-# ===== Show Node Status on Master =====
-echo "[INFO] Run the following command on the Master node to check node status:"
-echo "sudo k3s kubectl get nodes"
