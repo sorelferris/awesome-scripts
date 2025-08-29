@@ -19,19 +19,14 @@ echo "[INFO] Uninstalling old k3s-agent (if exists)..."
 sudo /usr/local/bin/k3s-agent-uninstall.sh 2>/dev/null || true
 sudo rm -rf /etc/rancher/k3s /var/lib/rancher/k3s
 
-# ===== Write systemd Environment File =====
-echo "[INFO] Writing systemd environment file..."
-sudo mkdir -p /etc/systemd/system/
-sudo tee /etc/systemd/system/k3s-agent.service.env > /dev/null <<EOF
-K3S_URL=https://${MASTER_IP}:6443
-K3S_TOKEN=${MASTER_TOKEN}
-EOF
-
 # ===== Install k3s-agent =====
 echo "[INFO] Installing k3s-agent..."
 curl -sfL https://get.k3s.io | \
+  K3S_URL="https://${MASTER_IP}:6443" \
+  K3S_TOKEN="${MASTER_TOKEN}" \
+  INSTALL_K3S_AGENT=1 \
   INSTALL_K3S_EXEC="--node-ip ${WORKER_IP} --insecure-skip-tls-verify" \
-  INSTALL_K3S_AGENT=1 sh -
+  sh -
 
 # ===== Start and Enable Service =====
 echo "[INFO] Enabling and starting k3s-agent service..."
