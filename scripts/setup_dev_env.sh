@@ -20,6 +20,18 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# Function to get tool version (silent fail)
+get_version() {
+    local tool=$1
+    local version_cmd=$2
+    if command_exists "$tool"; then
+        local version=$($version_cmd 2>/dev/null | head -n 1 | awk '{print $NF}' | sed 's/[^0-9\.]//g')
+        echo "$version"
+    else
+        echo "Not installed"
+    fi
+}
+
 # Check if the script is run as root (not recommended)
 if [ "$(id -u)" -eq 0 ]; then
     print_status "yellow" "Running as root is not recommended. Some installations may fail."
@@ -156,7 +168,41 @@ fi
 print_status "blue" "Applying zsh configuration..."
 source ~/.zshrc || print_status "yellow" "Could not source .zshrc (please restart your shell)"
 
-# Completion message
+# ==========================
+# Print version information
+# ==========================
+print_status "green" "============================================="
+print_status "blue" "              Tool Version Summary            "
+print_status "green" "============================================="
+
+# Source environment to ensure all tools are in PATH
+source $HOME/.zshrc 2>/dev/null || true
+source $HOME/.cargo/env 2>/dev/null || true
+source $HOME/miniforge3/etc/profile.d/conda.sh 2>/dev/null || true
+
+# Get and print versions
+ZSH_VERSION=$(get_version "zsh" "zsh --version")
+OMZ_VERSION="[Installed]" # No direct version command for oh-my-zsh
+FNM_VERSION=$(get_version "fnm" "fnm --version")
+CONDA_VERSION=$(get_version "conda" "conda --version")
+UV_VERSION=$(get_version "uv" "uv --version")
+RUSTC_VERSION=$(get_version "rustc" "rustc --version")
+CARGO_VERSION=$(get_version "cargo" "cargo --version")
+ADVCPMV_VERSION="[Installed]" # No version command for advcpmv
+
+# Print formatted version table
+echo -e "\033[1mTool           Version\033[0m"
+echo -e "-------------------------"
+echo -e "zsh            $ZSH_VERSION"
+echo -e "oh-my-zsh      $OMZ_VERSION"
+echo -e "fnm            $FNM_VERSION"
+echo -e "conda (miniforge3) $CONDA_VERSION"
+echo -e "uv             $UV_VERSION"
+echo -e "rustc          $RUSTC_VERSION"
+echo -e "cargo          $CARGO_VERSION"
+echo -e "advcpmv        $ADVCPMV_VERSION"
+
+# Final completion message
 print_status "green" "============================================="
 print_status "green" "Development environment setup completed!"
 print_status "blue" "Please restart your terminal or run: source ~/.zshrc"
