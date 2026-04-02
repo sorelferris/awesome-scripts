@@ -102,7 +102,19 @@ else
     print_status "green" "uv installation completed"
 fi
 
-# 5. Install Rust (Check if rustc and cargo exist)
+# 5. Install pixi (Check if pixi exists)
+print_status "blue" "Checking for pixi installation..."
+if command_exists pixi; then
+    print_status "yellow" "pixi is already installed, skipping..."
+else
+    curl -fsSL https://pixi.sh/install.sh | bash || {
+        print_status "red" "Failed to install pixi"
+        exit 1
+    }
+    print_status "green" "pixi installation completed"
+fi
+
+# 6. Install Rust (Check if rustc and cargo exist)
 print_status "blue" "Checking for Rust installation..."
 if command_exists rustc && command_exists cargo; then
     print_status "yellow" "Rust is already installed, skipping installation (updating instead)..."
@@ -119,7 +131,7 @@ else
     print_status "green" "Rust installation completed"
 fi
 
-# 6. Install advcpmv (cp/mv with progress bar) (Check if cpg/mvg exist and aliases are set)
+# 7. Install advcpmv (cp/mv with progress bar) (Check if cpg/mvg exist and aliases are set)
 print_status "blue" "Checking for advcpmv installation..."
 if command_exists cpg && command_exists mvg && grep -q "alias cp='/usr/local/bin/cpg -g'" ~/.zshrc 2>/dev/null; then
     print_status "yellow" "advcpmv is already installed and configured, skipping..."
