@@ -1,222 +1,332 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Exit immediately if a command exits with a non-zero status
-set -e
+# =============================================================================
+# setup_dev_env.sh — one-shot development environment setup
+#
+# Default installs (the four essentials):
+#   1. oh-my-zsh (via the repo's install-omz.sh)
+#   2. nvm + Node.js (default: latest 24.x)
+#   3. Miniforge3 (conda)
+#   4. uv
+#
+# Optional (off by default, enable with flags or --all):
+#   pixi, Rust (rustup), advcpmv
+#
+# Idempotent: already-installed tools are detected and skipped.
+# =============================================================================
 
-# Function to print colored status messages
-print_status() {
-    local color=$1
-    local message=$2
-    case $color in
-        "green") echo -e "\033[0;32m[✓] $message\033[0m" ;;
-        "yellow") echo -e "\033[1;33m[!] $message\033[0m" ;;
-        "red") echo -e "\033[0;31m[✗] $message\033[0m" ;;
-        "blue") echo -e "\033[0;34m[ℹ] $message\033[0m" ;;
+# -----------------------------------------------------------------------------
+# Configuration
+# -----------------------------------------------------------------------------
+NODE_VERSION="24"                     # Node.js major version to install
+NVM_VERSION="v0.40.4"                 # nvm release tag
+OMZ_SCRIPT_URL="https://raw.githubusercontent.com/sorelferris/awesome-scripts/refs/heads/main/scripts/install-omz.sh"
+CONDA_PREFIX="${CONDA_PREFIX:-$HOME/miniforge3}"
+
+# Step toggles (defaults: the four essentials)
+DO_OMZ=1
+DO_NODE=1
+DO_CONDA=1
+DO_UV=1
+DO_PIXI=0
+DO_RUST=0
+DO_ADVCPMV=0
+NO_COLOR="${NO_COLOR:-}"
+
+# -----------------------------------------------------------------------------
+# Argument parsing
+# -----------------------------------------------------------------------------
+usage() {
+    cat <<'EOF'
+Usage: setup_dev_env.sh [options]
+
+Default installs: oh-my-zsh, nvm + Node.js, Miniforge3 (conda), uv.
+
+Options:
+  -h, --help            Show this help message and exit
+      --all             Install everything, including optional tools
+      --with-pixi       Also install pixi
+      --with-rust       Also install Rust (rustup)
+      --with-advcpmv    Also install advcpmv (cp/mv with progress bar)
+      --skip-omz        Skip oh-my-zsh
+      --skip-node       Skip nvm + Node.js
+      --skip-conda      Skip Miniforge3
+      --skip-uv         Skip uv
+      --node-version V  Node.js version to install (default: 24)
+      --no-color        Disable colored output
+
+Environment:
+  CONDA_PREFIX          Where to install Miniforge3 (default: ~/miniforge3)
+  NO_COLOR=1            Disable colored output
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)         usage; exit 0 ;;
+        --all)             DO_PIXI=1; DO_RUST=1; DO_ADVCPMV=1 ;;
+        --with-pixi)       DO_PIXI=1 ;;
+        --with-rust)       DO_RUST=1 ;;
+        --with-advcpmv)    DO_ADVCPMV=1 ;;
+        --skip-omz)        DO_OMZ=0 ;;
+        --skip-node)       DO_NODE=0 ;;
+        --skip-conda)      DO_CONDA=0 ;;
+        --skip-uv)         DO_UV=0 ;;
+        --node-version)    NODE_VERSION="$2"; shift ;;
+        --no-color)        NO_COLOR=1 ;;
+        *) echo "error: unknown option: $1" >&2; usage >&2; exit 1 ;;
     esac
-}
+    shift
+done
 
-# Function to check if a command exists
-command_exists() {
-    command -v "$1" >/dev/null 2>&1
-}
+# -----------------------------------------------------------------------------
+# Output helpers (colors resolved after --no-color is parsed)
+# -----------------------------------------------------------------------------
+if [[ -t 1 && -z "$NO_COLOR" ]]; then
+    _c_green=$'\033[0;32m'
+    _c_yellow=$'\033[1;33m'
+    _c_red=$'\033[0;31m'
+    _c_blue=$'\033[0;34m'
+    _c_bold=$'\033[1m'
+    _c_reset=$'\033[0m'
+else
+    _c_green=""; _c_yellow=""; _c_red=""; _c_blue=""; _c_bold=""; _c_reset=""
+fi
 
-# Function to get tool version (silent fail)
-get_version() {
-    local tool=$1
-    local version_cmd=$2
-    if command_exists "$tool"; then
-        local version=$($version_cmd 2>/dev/null | head -n 1 | awk '{print $NF}' | sed 's/[^0-9\.]//g')
-        echo "$version"
+ok()   { printf '%s[✓]%s %s\n' "$_c_green" "$_c_reset" "$*"; }
+warn() { printf '%s[!]%s %s\n' "$_c_yellow" "$_c_reset" "$*"; }
+err()  { printf '%s[✗]%s %s\n' "$_c_red" "$_c_reset" "$*" >&2; }
+info() { printf '%s[ℹ]%s %s\n' "$_c_blue" "$_c_reset" "$*"; }
+hdr()  { printf '\n%s==>%s %s%s%s\n' "$_c_bold" "$_c_reset" "$_c_bold" "$*" "$_c_reset"; }
+
+command_exists() { command -v "$1" >/dev/null 2>&1; }
+
+# download <url> <dest>  — prefers curl, falls back to wget
+download() {
+    local url="$1" dest="$2"
+    if command_exists curl; then
+        curl -fsSL "$url" -o "$dest"
+    elif command_exists wget; then
+        wget -q "$url" -O "$dest"
     else
-        echo "Not installed"
+        err "neither curl nor wget is available"
+        return 1
     fi
 }
 
-# Check if the script is run as root (not recommended)
+# -----------------------------------------------------------------------------
+# Installation steps
+# -----------------------------------------------------------------------------
+
+ensure_system_deps() {
+    local missing=""
+    for c in curl wget git; do
+        command_exists "$c" || missing="$missing $c"
+    done
+    [ -n "$missing" ] || return 0
+    info "Installing missing system packages:$missing"
+    if [ "$(id -u)" -eq 0 ]; then
+        apt-get update && apt-get install -y $missing
+    else
+        sudo apt-get update && sudo apt-get install -y $missing
+    fi
+}
+
+install_omz() {
+    if command_exists zsh && [ -d "$HOME/.oh-my-zsh" ]; then
+        warn "oh-my-zsh already installed, skipping"
+        return 0
+    fi
+    local script="$WORKDIR/install-omz.sh"
+    download "$OMZ_SCRIPT_URL" "$script" || return 1
+    chmod +x "$script"
+    sh "$script"
+}
+
+install_node() {
+    export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+    if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+        local installer="$WORKDIR/nvm-install.sh"
+        download "https://raw.githubusercontent.com/nvm-sh/nvm/$NVM_VERSION/install.sh" "$installer" || return 1
+        bash "$installer" || return 1
+    else
+        warn "nvm already installed, skipping"
+    fi
+
+    # shellcheck disable=SC1090
+    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+    nvm install "$NODE_VERSION"
+    nvm alias default "$NODE_VERSION"
+    nvm use default
+}
+
+install_conda() {
+    if [ -x "$CONDA_PREFIX/bin/conda" ]; then
+        warn "Miniforge3 already installed at $CONDA_PREFIX, skipping"
+        return 0
+    fi
+
+    local arch
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64|amd64) arch="x86_64" ;;
+        aarch64|arm64) arch="aarch64" ;;
+        *) err "unsupported architecture for Miniforge3: $arch"; return 1 ;;
+    esac
+
+    local fname="Miniforge3-$(uname)-$arch.sh"
+    local installer="$WORKDIR/$fname"
+    download "https://github.com/conda-forge/miniforge/releases/latest/download/$fname" "$installer" || return 1
+
+    # -b: batch mode (accept license), -p: install prefix
+    bash "$installer" -b -p "$CONDA_PREFIX" || return 1
+
+    # Initialize conda for the detected shell(s)
+    local conda_bin="$CONDA_PREFIX/bin/conda"
+    "$conda_bin" init bash >/dev/null 2>&1 || true
+    command_exists zsh && "$conda_bin" init zsh >/dev/null 2>&1 || true
+    ok "Miniforge3 installed to $CONDA_PREFIX"
+}
+
+install_uv() {
+    if command_exists uv || [ -x "$HOME/.local/bin/uv" ]; then
+        warn "uv already installed, skipping"
+        return 0
+    fi
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+}
+
+install_pixi() {
+    if command_exists pixi || [ -x "$HOME/.pixi/bin/pixi" ]; then
+        warn "pixi already installed, skipping"
+        return 0
+    fi
+    curl -fsSL https://pixi.sh/install.sh | bash
+}
+
+install_rust() {
+    if command_exists rustc && command_exists cargo; then
+        warn "Rust already installed, running rustup update"
+        # shellcheck disable=SC1090
+        [ -s "$HOME/.cargo/env" ] && \. "$HOME/.cargo/env" 2>/dev/null || true
+        rustup update || true
+        return 0
+    fi
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    # shellcheck disable=SC1090
+    [ -s "$HOME/.cargo/env" ] && \. "$HOME/.cargo/env"
+}
+
+install_advcpmv() {
+    if command_exists cpg && command_exists mvg; then
+        warn "advcpmv already installed, skipping"
+        return 0
+    fi
+    info "Installing build dependencies for advcpmv"
+    if [ "$(id -u)" -eq 0 ]; then
+        apt-get install -y build-essential autoconf automake
+    else
+        sudo apt-get install -y build-essential autoconf automake
+    fi
+
+    local dir="$WORKDIR/advcpmv"
+    mkdir -p "$dir"
+    download "https://raw.githubusercontent.com/jarun/advcpmv/master/install.sh" "$dir/install.sh" || return 1
+    (
+        cd "$dir"
+        export FORCE_UNSAFE_CONFIGURE=1
+        sh install.sh
+    ) || { warn "advcpmv build failed"; return 1; }
+
+    sudo mv "$dir/advcp" /usr/local/bin/cpg || return 1
+    sudo mv "$dir/advmv" /usr/local/bin/mvg || return 1
+
+    # Register aliases only if not already present
+    local rc="$HOME/.zshrc"
+    grep -q "alias cp='cpg -g'" "$rc" 2>/dev/null || echo "alias cp='cpg -g'" >> "$rc"
+    grep -q "alias mv='mvg -g'" "$rc" 2>/dev/null || echo "alias mv='mvg -g'" >> "$rc"
+}
+
+# -----------------------------------------------------------------------------
+# Summary
+# -----------------------------------------------------------------------------
+print_summary() {
+    # Make installed tools resolvable for version reporting
+    export PATH="$HOME/.local/bin:$HOME/.pixi/bin:$HOME/.cargo/bin:$PATH"
+    # shellcheck disable=SC1090
+    [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ] && \. "${NVM_DIR:-$HOME/.nvm}/nvm.sh" 2>/dev/null || true
+    # shellcheck disable=SC1090
+    [ -s "$CONDA_PREFIX/etc/profile.d/conda.sh" ] && \. "$CONDA_PREFIX/etc/profile.d/conda.sh" 2>/dev/null || true
+
+    # qv <cmd> [args...] — first line of output, or "—"
+    qv() {
+        local c="$1"; shift
+        if command_exists "$c"; then
+            "$c" "$@" 2>/dev/null | head -n1
+        else
+            echo "—"
+        fi
+    }
+
+    local zsh_v node_v npm_v conda_v uv_v pixi_v rustc_v cpg_v
+    zsh_v=$(qv zsh --version)
+    node_v=$(qv node --version)
+    npm_v=$(qv npm --version)
+    conda_v=$(qv conda --version)
+    uv_v=$(qv uv --version)
+    pixi_v=$(qv pixi --version)
+    rustc_v=$(qv rustc --version)
+    cpg_v=$(qv cpg --version)
+
+    printf '\n%s\n' "$_c_bold=============================================$_c_reset"
+    printf '%s%s  Tool Version Summary%s\n' "$_c_bold" "$_c_green" "$_c_reset"
+    printf '%s\n' "$_c_bold=============================================$_c_reset"
+    printf '%-16s %s\n' "zsh" "$zsh_v"
+    printf '%-16s %s\n' "node" "$node_v"
+    printf '%-16s %s\n' "npm" "$npm_v"
+    printf '%-16s %s\n' "conda (miniforge3)" "$conda_v"
+    printf '%-16s %s\n' "uv" "$uv_v"
+    printf '%-16s %s\n' "pixi" "$pixi_v"
+    printf '%-16s %s\n' "rustc" "$rustc_v"
+    printf '%-16s %s\n' "cpg (advcpmv)" "${cpg_v:-—}"
+}
+
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
+printf '%s\n' "${_c_bold}=============================================${_c_reset}"
+printf '%s\n' "${_c_bold}     Development Environment Setup${_c_reset}"
+printf '%s\n' "${_c_bold}=============================================${_c_reset}"
+
+WORKDIR=$(mktemp -d)
+trap 'rm -rf "$WORKDIR"' EXIT
+
 if [ "$(id -u)" -eq 0 ]; then
-    print_status "yellow" "Running as root is not recommended. Some installations may fail."
-    sleep 3
+    warn "running as root is not recommended; some installers may misbehave"
 fi
 
-# Install dependencies first
-print_status "blue" "Installing required system dependencies..."
-sudo apt update && sudo apt install -y wget curl git build-essential || {
-    print_status "red" "Failed to install system dependencies"
-    exit 1
-}
+# Show the plan
+info "Installing:"
+[ "$DO_OMZ" -eq 1 ] && echo "   • oh-my-zsh"
+[ "$DO_NODE" -eq 1 ] && echo "   • nvm + Node.js ${NODE_VERSION}.x"
+[ "$DO_CONDA" -eq 1 ] && echo "   • Miniforge3 (conda)"
+[ "$DO_UV" -eq 1 ] && echo "   • uv"
+[ "$DO_PIXI" -eq 1 ] && echo "   • pixi (optional)"
+[ "$DO_RUST" -eq 1 ] && echo "   • Rust (optional)"
+[ "$DO_ADVCPMV" -eq 1 ] && echo "   • advcpmv (optional)"
 
-# 1. Install oh-my-zsh (Check if zsh and oh-my-zsh are installed)
-print_status "blue" "Checking for oh-my-zsh installation..."
-if command_exists zsh && [ -d "$HOME/.oh-my-zsh" ]; then
-    print_status "yellow" "oh-my-zsh is already installed, skipping..."
-else
-    wget -q https://raw.githubusercontent.com/sorelferris/awesome-scripts/refs/heads/main/scripts/install-omz.sh -O install-omz.sh || {
-        print_status "red" "Failed to download oh-my-zsh install script"
-        exit 1
-    }
-    chmod +x install-omz.sh
-    sh install-omz.sh || print_status "yellow" "oh-my-zsh installation may have completed with warnings"
-    rm -f install-omz.sh
-    print_status "green" "oh-my-zsh installation completed"
-fi
+ensure_system_deps || { err "failed to install system dependencies"; exit 1; }
 
-# 2. Install fnm (Fast Node Manager) (Check if fnm exists)
-print_status "blue" "Checking for fnm installation..."
-if command_exists fnm; then
-    print_status "yellow" "fnm is already installed, skipping..."
-else
-    curl -fsSL https://fnm.vercel.app/install | bash || {
-        print_status "red" "Failed to install fnm"
-        exit 1
-    }
-    print_status "green" "fnm installation completed"
-fi
+[ "$DO_OMZ" -eq 1 ] && { hdr "oh-my-zsh"; install_omz || warn "oh-my-zsh reported errors (continuing)"; }
+[ "$DO_NODE" -eq 1 ] && { hdr "nvm + Node.js ${NODE_VERSION}.x"; install_node || warn "node setup failed (continuing)"; }
+[ "$DO_CONDA" -eq 1 ] && { hdr "Miniforge3 (conda)"; install_conda || warn "conda setup failed (continuing)"; }
+[ "$DO_UV" -eq 1 ] && { hdr "uv"; install_uv || warn "uv setup failed (continuing)"; }
+[ "$DO_PIXI" -eq 1 ] && { hdr "pixi (optional)"; install_pixi || warn "pixi setup failed (continuing)"; }
+[ "$DO_RUST" -eq 1 ] && { hdr "Rust (optional)"; install_rust || warn "rust setup failed (continuing)"; }
+[ "$DO_ADVCPMV" -eq 1 ] && { hdr "advcpmv (optional)"; install_advcpmv || warn "advcpmv setup failed (continuing)"; }
 
-# 3. Install Miniforge3 (Check if conda exists)
-print_status "blue" "Checking for Miniforge3 installation..."
-if command_exists conda && [[ "$(conda info --base)" == *"miniforge3"* ]]; then
-    print_status "yellow" "Miniforge3 is already installed, skipping..."
-else
-    MINIFORGE_FILE="Miniforge3-$(uname)-$(uname -m).sh"
-    wget -q "https://github.com/conda-forge/miniforge/releases/latest/download/$MINIFORGE_FILE" || {
-        print_status "red" "Failed to download Miniforge3"
-        exit 1
-    }
-    bash "$MINIFORGE_FILE" -b || {  # -b for batch mode (no interactive prompts)
-        print_status "red" "Failed to install Miniforge3"
-        exit 1
-    }
-    rm -f "$MINIFORGE_FILE"
-    print_status "green" "Miniforge3 installation completed"
-fi
+print_summary
 
-# 4. Install uv package manager (Check if uv exists)
-print_status "blue" "Checking for uv installation..."
-if command_exists uv; then
-    print_status "yellow" "uv is already installed, skipping..."
-else
-    curl -LsSf https://astral.sh/uv/install.sh | sh || {
-        print_status "red" "Failed to install uv"
-        exit 1
-    }
-    print_status "green" "uv installation completed"
-fi
-
-# 5. Install pixi (Check if pixi exists)
-print_status "blue" "Checking for pixi installation..."
-if command_exists pixi; then
-    print_status "yellow" "pixi is already installed, skipping..."
-else
-    curl -fsSL https://pixi.sh/install.sh | bash || {
-        print_status "red" "Failed to install pixi"
-        exit 1
-    }
-    print_status "green" "pixi installation completed"
-fi
-
-# 6. Install Rust (Check if rustc and cargo exist)
-print_status "blue" "Checking for Rust installation..."
-if command_exists rustc && command_exists cargo; then
-    print_status "yellow" "Rust is already installed, skipping installation (updating instead)..."
-    source $HOME/.cargo/env 2>/dev/null || true
-    rustup update || print_status "yellow" "Rust update may have completed with warnings"
-else
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y || {  # -y to auto-confirm
-        print_status "red" "Failed to install Rust"
-        exit 1
-    }
-    # Source rust environment to update current shell
-    source $HOME/.cargo/env
-    rustup update || print_status "yellow" "Rust update may have completed with warnings"
-    print_status "green" "Rust installation completed"
-fi
-
-# 7. Install advcpmv (cp/mv with progress bar) (Check if cpg/mvg exist and aliases are set)
-print_status "blue" "Checking for advcpmv installation..."
-if command_exists cpg && command_exists mvg && grep -q "alias cp='/usr/local/bin/cpg -g'" ~/.zshrc 2>/dev/null; then
-    print_status "yellow" "advcpmv is already installed and configured, skipping..."
-else
-    mkdir -p advcpmv
-    curl -s https://raw.githubusercontent.com/jarun/advcpmv/master/install.sh -o ./advcpmv/install.sh || {
-        print_status "red" "Failed to download advcpmv install script"
-        exit 1
-    }
-
-    # Fix configure error by setting FORCE_UNSAFE_CONFIGURE
-    cd advcpmv
-    export FORCE_UNSAFE_CONFIGURE=1
-    sh install.sh || {
-        print_status "red" "Failed to compile advcpmv"
-        cd .. && rm -rf advcpmv
-        exit 1
-    }
-    cd ..
-
-    # Move binaries to system path
-    sudo mv ./advcpmv/advcp /usr/local/bin/cpg || {
-        print_status "red" "Failed to move advcp binary"
-        exit 1
-    }
-    sudo mv ./advcpmv/advmv /usr/local/bin/mvg || {
-        print_status "red" "Failed to move advmv binary"
-        exit 1
-    }
-
-    # Add aliases to zshrc (only if not already present)
-    print_status "blue" "Configuring aliases for advcpmv..."
-    if ! grep -q "alias cp='/usr/local/bin/cpg -g'" ~/.zshrc 2>/dev/null; then
-        echo 'alias cp='/usr/local/bin/cpg -g'' >> ~/.zshrc
-    fi
-    if ! grep -q "alias mv='/usr/local/bin/mvg -g'" ~/.zshrc 2>/dev/null; then
-        echo 'alias mv='/usr/local/bin/mvg -g'' >> ~/.zshrc
-    fi
-
-    # Cleanup
-    rm -rf advcpmv
-    print_status "green" "advcpmv installation and configuration completed"
-fi
-
-# Final setup
-print_status "blue" "Applying zsh configuration..."
-source ~/.zshrc || print_status "yellow" "Could not source .zshrc (please restart your shell)"
-
-# ==========================
-# Print version information
-# ==========================
-print_status "green" "============================================="
-print_status "blue" "              Tool Version Summary            "
-print_status "green" "============================================="
-
-# Source environment to ensure all tools are in PATH
-source $HOME/.zshrc 2>/dev/null || true
-source $HOME/.cargo/env 2>/dev/null || true
-source $HOME/miniforge3/etc/profile.d/conda.sh 2>/dev/null || true
-
-# Get and print versions
-ZSH_VERSION=$(get_version "zsh" "zsh --version")
-OMZ_VERSION="[Installed]" # No direct version command for oh-my-zsh
-FNM_VERSION=$(get_version "fnm" "fnm --version")
-CONDA_VERSION=$(get_version "conda" "conda --version")
-UV_VERSION=$(get_version "uv" "uv --version")
-RUSTC_VERSION=$(get_version "rustc" "rustc --version")
-CARGO_VERSION=$(get_version "cargo" "cargo --version")
-ADVCPMV_VERSION="[Installed]" # No version command for advcpmv
-
-# Print formatted version table
-echo -e "\033[1mTool           Version\033[0m"
-echo -e "-------------------------"
-echo -e "zsh            $ZSH_VERSION"
-echo -e "oh-my-zsh      $OMZ_VERSION"
-echo -e "fnm            $FNM_VERSION"
-echo -e "conda (miniforge3) $CONDA_VERSION"
-echo -e "uv             $UV_VERSION"
-echo -e "rustc          $RUSTC_VERSION"
-echo -e "cargo          $CARGO_VERSION"
-echo -e "advcpmv        $ADVCPMV_VERSION"
-
-# Final completion message
-print_status "green" "============================================="
-print_status "green" "Development environment setup completed!"
-print_status "blue" "Please restart your terminal or run: source ~/.zshrc"
-print_status "blue" "To apply all changes"
-print_status "green" "============================================="
+printf '\n%s[✓]%s Setup complete.%s\n' "$_c_green" "$_c_bold" "$_c_reset"
+info "Restart your terminal, or run: source ~/.zshrc"
