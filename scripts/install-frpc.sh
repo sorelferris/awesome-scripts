@@ -37,6 +37,10 @@ while [ $# -gt 0 ]; do
         -h|--help)   usage; exit 0 ;;
         --start)     DO_START=1 ;;
         --no-color)  NO_COLOR=1 ;;
+        --version)
+            echo "install-frpc.sh (local script)"
+            exit 0
+            ;;
         *) echo "error: unknown option: $1" >&2; usage >&2; exit 1 ;;
     esac
     shift
@@ -60,10 +64,37 @@ hdr()  { printf '\n%s==>%s %s%s%s\n' "$_c_bold" "$_c_reset" "$_c_bold" "$*" "$_c
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
-# download <url> <dest>  — follows redirects, retries transient failures
+# Detect a proxy from common env vars. Returns the proxy URL or "" if none set.
+# Honours both upper- and lower-case names; empty strings are ignored.
+detect_proxy() {
+    local var
+    for var in HTTPS_PROXY https_proxy ALL_PROXY all_proxy; do
+        if [ -n "${!var}" ]; then
+            printf '%s' "${!var}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Build a curl --proxy flag (with argument), or empty string if no proxy set.
+# Caches the detected proxy in _PROXY_URL on first call.
+curl_proxy_args() {
+    if [ -z "${_PROXY_URL+x}" ]; then
+        _PROXY_URL=$(detect_proxy || true)
+    fi
+    if [ -n "$_PROXY_URL" ]; then
+        printf -- '--proxy %s ' "$_PROXY_URL"
+    fi
+}
+
+# download <url> <dest>  — follows redirects, retries transient failures,
+# uses HTTPS_PROXY/ALL_PROXY if set, and never hangs forever
 download() {
     local url="$1" dest="$2"
-    curl -fsSL --retry 3 "$url" -o "$dest"
+    # shellcheck disable=SC2046
+    curl -fsSL --connect-timeout 10 --max-time 300 --retry 3 --retry-delay 2 \
+        $(curl_proxy_args) "$url" -o "$dest"
 }
 
 # Map `uname -m` to the architecture suffix used in frp release assets
@@ -77,14 +108,49 @@ detect_arch() {
     esac
 }
 
-# Resolve the latest release tag (e.g. v0.61.1) via GitHub's redirect
+# Resolve the latest release tag (e.g. v0.61.1) via the GitHub Releases API.
+# This endpoint returns JSON directly and is more reliable in restricted networks
+# than following the /releases/latest redirect, which often hangs or is blocked.
+#
+# If the API call fails, fall back to a HEAD on the redirect and parse the
+# final URL (with a hard timeout so we never hang the script).
 latest_version() {
-    local url
-    url=$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest") || {
-        err "failed to resolve latest release URL"
-        return 1
-    }
-    basename "$url"
+    local proxy_args json url
+    # shellcheck disable=SC2046
+    proxy_args=$(curl_proxy_args)
+
+    # Primary: GitHub Releases API (returns JSON, no redirect chasing needed)
+    if json=$(curl -fsSL --connect-timeout 10 --max-time 30 \
+                -H 'Accept: application/vnd.github+json' \
+                $proxy_args \
+                "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null) \
+        && command_exists python3 \
+        && version=$(printf '%s' "$json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])' 2>/dev/null) \
+        && [ -n "$version" ]; then
+        printf '%s' "$version"
+        return 0
+    fi
+
+    # Fallback: follow /releases/latest with a strict timeout
+    if url=$(curl -fsSL --connect-timeout 10 --max-time 30 -o /dev/null \
+                -w '%{url_effective}' $proxy_args \
+                "https://github.com/$REPO/releases/latest" 2>/dev/null) \
+        && [ -n "$url" ]; then
+        basename "$url"
+        return 0
+    fi
+
+    cat >&2 <<EOF
+failed to reach github.com / api.github.com.
+
+  • If you are behind a firewall, set a proxy before running this script:
+      export HTTPS_PROXY=http://127.0.0.1:7890
+      # or
+      export ALL_PROXY=socks5://127.0.0.1:1080
+
+  • Current detected proxy: ${_PROXY_URL:-<none>}
+EOF
+    return 1
 }
 
 # -----------------------------------------------------------------------------
@@ -107,6 +173,10 @@ WORKDIR=$(mktemp -d)
 trap 'rm -rf "$WORKDIR"' EXIT
 
 hdr "Resolving latest frp release"
+if _proxy=$(detect_proxy 2>/dev/null) && [ -n "$_proxy" ]; then
+    info "using proxy: $_proxy"
+fi
+printf '[info] %s …\n' "querying api.github.com/repos/$REPO/releases/latest"
 version=$(latest_version) || exit 1
 ver="${version#v}"
 [ -n "$ver" ] || { err "could not determine a version from tag: $version"; exit 1; }
@@ -121,7 +191,15 @@ url="https://github.com/$REPO/releases/download/${version}/${asset}"
 tarball="$WORKDIR/$asset"
 
 hdr "Downloading $asset"
-download "$url" "$tarball" || { err "download failed: $url"; exit 1; }
+download "$url" "$tarball" || {
+    err "download failed: $url"
+    [ -n "${_PROXY_URL:-}" ] || cat >&2 <<'EOF'
+
+Hint: github.com is not reachable from this network. Re-run with a proxy:
+  HTTPS_PROXY=http://127.0.0.1:7890 sudo -E install-frpc.sh
+EOF
+    exit 1
+}
 
 hdr "Installing to $INSTALL_DIR"
 tar -xzf "$tarball" -C "$WORKDIR"
