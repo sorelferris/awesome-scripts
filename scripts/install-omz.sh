@@ -25,6 +25,7 @@
 #   BRANCH  - branch to check out immediately after install (default: master)
 #
 # Other options:
+#   ZSH_CUSTOM - path to custom plugins and themes (default: $ZSH/custom)
 #   CHSH       - 'no' means the installer will not change the default shell (default: yes)
 #   RUNZSH     - 'no' means the installer will not run zsh after the install (default: yes)
 #   KEEP_ZSHRC - 'yes' means the installer will not replace an existing .zshrc (default: no)
@@ -367,7 +368,19 @@ setup_zshrc() {
   fi
   omz=$(echo "$omz" | sed "s|^$HOME/|\$HOME/|")
 
-  sed "s|^export ZSH=.*$|export ZSH=\"${omz}\"|" "$ZSH/templates/zshrc.zsh-template" > "$zdot/.zshrc-omztemp"
+  # Write a new file instead of using sed -i, whose syntax differs between
+  # macOS (BSD sed) and Ubuntu (GNU sed). Let Oh My Zsh load the plugins once.
+  sed -e "s|^export ZSH=.*$|export ZSH=\"${omz}\"|" \
+    -e 's/^ZSH_THEME="robbyrussell"$/ZSH_THEME="steeef"/' \
+    -e 's/^plugins=(git)$/plugins=(git zsh-autosuggestions zsh-syntax-highlighting)/' \
+    "$ZSH/templates/zshrc.zsh-template" > "$zdot/.zshrc-omztemp"
+  # Persist a custom plugin directory so future shells can find the plugins.
+  if [ -n "$ZSH_CUSTOM" ]; then
+    custom_dir=$(printf '%s\n' "$ZSH_CUSTOM" | sed "s/'/'\\\\''/g")
+    printf "\nexport ZSH_CUSTOM='%s'\n" "$custom_dir" > "$zdot/.zshrc-customtemp"
+    cat "$zdot/.zshrc-omztemp" >> "$zdot/.zshrc-customtemp"
+    mv -f "$zdot/.zshrc-customtemp" "$zdot/.zshrc-omztemp"
+  fi
   mv -f "$zdot/.zshrc-omztemp" "$zdot/.zshrc"
 
   echo
@@ -380,7 +393,7 @@ setup_shell() {
   fi
 
   # If this user's login shell is already "zsh", do not attempt to switch.
-  if [ "$(basename -- "$SHELL")" = "zsh" ]; then
+  if [ "${SHELL##*/}" = "zsh" ]; then
     return
   fi
 
@@ -453,17 +466,17 @@ EOF
   # be prompted for the password either way, so this shouldn't cause any issues.
   #
   if user_can_sudo; then
-    sudo -k chsh -s "$zsh" "$USER"  # -k forces the password prompt
+    set -- sudo -k chsh -s "$zsh" "$USER"  # -k forces the password prompt
   else
-    chsh -s "$zsh" "$USER"          # run chsh normally
+    set -- chsh -s "$zsh" "$USER"
   fi
 
-  # Check if the shell change was successful
-  if [ $? -ne 0 ]; then
-    fmt_error "chsh command unsuccessful. Change your default shell manually."
-  else
+  # Keep failures inside a conditional so set -e does not abort installation.
+  if "$@"; then
     export SHELL="$zsh"
     echo "${FMT_GREEN}Shell successfully changed to '$zsh'.${FMT_RESET}"
+  else
+    fmt_error "chsh command unsuccessful. Change your default shell manually."
   fi
 
   echo
@@ -510,6 +523,10 @@ main() {
 
   if ! command_exists zsh; then
     echo "${FMT_YELLOW}Zsh is not installed.${FMT_RESET} Please install zsh first."
+    case "$(uname -s)" in
+      Darwin) echo "macOS: use /bin/zsh or install it with 'brew install zsh'." ;;
+      Linux) echo "Ubuntu: install dependencies with 'sudo apt-get update && sudo apt-get install -y zsh git'." ;;
+    esac
     exit 1
   fi
 
@@ -545,29 +562,24 @@ EOF
 
   echo "${FMT_BLUE}Installing Oh My Zsh...${FMT_RESET}"
   # Install plugins and custom themes
-  git clone https://github.com/zsh-users/zsh-autosuggestions.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions
-  git clone https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
+  custom_dir=${ZSH_CUSTOM:-$ZSH/custom}
+  mkdir -p "$custom_dir/plugins"
+  git clone https://github.com/zsh-users/zsh-autosuggestions.git "$custom_dir/plugins/zsh-autosuggestions"
+  git clone https://github.com/zsh-users/zsh-syntax-highlighting.git "$custom_dir/plugins/zsh-syntax-highlighting"
 
   # Use the Gitee mirrors if GitHub is not accessible
-  # git clone https://gitee.com/mirrors/zsh-autosuggestions.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions
-  # git clone https://gitee.com/Annihilater/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
+  # git clone https://gitee.com/mirrors/zsh-autosuggestions.git "$custom_dir/plugins/zsh-autosuggestions"
+  # git clone https://gitee.com/Annihilater/zsh-syntax-highlighting.git "$custom_dir/plugins/zsh-syntax-highlighting"
 
   # git clone https://gitee.com/synchub/spaceship-prompt.git "$ZSH_CUSTOM/themes/spaceship-prompt" --depth=1
   # ln -s "$ZSH_CUSTOM/themes/spaceship-prompt/spaceship.zsh-theme" "$ZSH_CUSTOM/themes/spaceship.zsh-theme"
 
 
-  # add zsh-autosuggestions and zsh-syntax-highlighting to plugins in ~/.zshrc
-  sed -i '1i\source ~/.oh-my-zsh/custom/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh' ~/.zshrc
-  sed -i '1i\source ~/.oh-my-zsh/custom/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh' ~/.zshrc
-  sed -i 's/ZSH_THEME="robbyrussell"/ZSH_THEME="steeef"/g' ~/.zshrc
-  sed -i 's/plugins=(git)/plugins=(git zsh-autosuggestions zsh-syntax-highlighting)/g' ~/.zshrc
-  chsh -s /bin/zsh
-
   setup_shell
 
   print_success
 
-  if [ $RUNZSH = no ]; then
+  if [ "$RUNZSH" = no ]; then
     echo "${FMT_YELLOW}Run zsh to try it out.${FMT_RESET}"
     exit
   fi
