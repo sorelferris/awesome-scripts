@@ -1,6 +1,10 @@
 # awesome-scripts
 Some useful scripts.
 
+## Cheatsheets
+
+- [Infrastructure and app naming cheatsheet](naming_cheatsheet.html) — browse themed names and copy hostname patterns.
+
 ## GNOME three-finger drag
 
 Install native three-finger dragging for Ubuntu 26.04, GNOME Shell 50, and Wayland:
