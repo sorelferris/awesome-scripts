@@ -206,6 +206,11 @@ def refresh_sudo(sudo, stop):
 
 
 def list_items(items):
+    use_color = (
+        sys.stdout.isatty()
+        and os.environ.get("TERM", "dumb") != "dumb"
+        and not os.environ.get("NO_COLOR")
+    )
     for item in items:
         status = "unavailable"
         if item["available"]:
@@ -214,7 +219,8 @@ def list_items(items):
             status = "installed" if item["managed"] else "installed externally"
         elif item["incomplete"] and item["available"]:
             status = "incomplete"
-        print(f'{item["key"]:14} {status:21} {item["label"]}')
+        line = f'{item["key"]:14} {status:21} {item["label"]}'
+        print(f"\x1b[32m{line}\x1b[0m" if use_color and item["installed"] else line)
 
 
 def main():

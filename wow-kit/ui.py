@@ -1,6 +1,7 @@
 """Terminal catalog and review screen for wow-kit."""
 
 import curses
+import os
 import sys
 import termios
 import textwrap
@@ -68,6 +69,21 @@ def _put(window, y, value, columns, attr=0):
         window.addstr(y, 0, "".join(line), attr)
 
 
+def _installed_attr():
+    if os.environ.get("NO_COLOR") or not curses.has_colors():
+        return curses.A_NORMAL
+    try:
+        curses.use_default_colors()
+        background = -1
+    except curses.error:
+        background = curses.COLOR_BLACK
+    try:
+        curses.init_pair(1, curses.COLOR_GREEN, background)
+    except curses.error:
+        return curses.A_NORMAL
+    return curses.color_pair(1)
+
+
 def _select(window, items, describe_plan):
     previous_cursor = None
     try:
@@ -75,13 +91,13 @@ def _select(window, items, describe_plan):
     except curses.error:
         pass
     try:
-        return _menu(window, items, describe_plan)
+        return _menu(window, items, describe_plan, _installed_attr())
     finally:
         if previous_cursor is not None:
             curses.curs_set(previous_cursor)
 
 
-def _menu(window, items, describe_plan):
+def _menu(window, items, describe_plan, installed_attr):
     index = 0
     marked = set()
     review = None
@@ -122,7 +138,10 @@ def _menu(window, items, describe_plan):
             item = entries[position]
             label = item if reviewing else _row(item, position in marked)
             prefix = "> " if position == cursor else "  "
-            attr = curses.A_REVERSE if position == cursor else curses.A_NORMAL
+            if not reviewing and item["installed"] and installed_attr:
+                attr = installed_attr | (curses.A_BOLD if position == cursor else curses.A_NORMAL)
+            else:
+                attr = curses.A_REVERSE if position == cursor else curses.A_NORMAL
             _put(window, position - start + 2, prefix + label, width, attr)
 
         title = f"{len(marked)} selected"

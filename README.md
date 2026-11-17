@@ -9,7 +9,7 @@ Some useful scripts.
 bash scripts/install-wow-kit.sh --launch
 ```
 
-安装后，新的 Bash 或 Zsh 终端可以用 `wo`、`wow` 或 `wow-kit` 进入同一个菜单。当前终端也可以直接运行 `~/.local/bin/wo`。用 ↑/↓ 移动，空格标记安装或卸载，回车预览，再按一次回车执行。用 Esc 返回或 Q 退出。
+安装后，新的 Bash 或 Zsh 终端可以用 `wo`、`wow` 或 `wow-kit` 进入同一个菜单。当前终端也可以直接运行 `~/.local/bin/wo`。在支持颜色的终端里，已安装项显示为绿色。用 ↑/↓ 移动，空格标记安装或卸载，回车预览，再按一次回车执行。用 Esc 返回或 Q 退出。
 
 如果没有本地检出，可以直接运行下面的命令。
 
@@ -31,7 +31,35 @@ wo --remove uv pixi
 
 需要管理员权限的操作会在执行计划前统一认证一次。之后安装器禁用交互输入，系统软件包操作用 `sudo -n`。用于脚本或无人值守时可加 `--no-prompt`，先在同一终端运行 `sudo -v`，或由管理员事先授权。wow-kit 使用系统现有的 sudo 策略。
 
-首版面向 Debian/Ubuntu 系 Linux 和 macOS。WowType 使用[上游发布的软件包](https://github.com/Gloridust/WowType/releases/tag/v0.4.0)，菜单会按系统版本和架构判断是否可用。无桌面会话时可以安装软件包，输入源配置需要在登录桌面后完成。
+### wow-kit 本体
+
+终端菜单需要 Bash 和 Python 3.8 或更新版本，并要求 Python 提供 `curses`、`fcntl` 和 `termios`。本体按这些运行条件判断兼容性，系统版本和架构还会影响各个工具的可用性。
+
+| 平台 | 系统版本 | 架构与依赖 |
+| --- | --- | --- |
+| Ubuntu、Debian 及其他 APT 系 Linux | 满足上述运行条件的版本 | CLI 本体无固定架构限制，各工具按架构和依赖判断。系统依赖可通过 APT 补齐。 |
+| macOS | 满足上述运行条件的版本 | Apple Silicon（arm64）与 Intel（x86_64）。如已安装 Homebrew，可用它补齐系统依赖。 |
+| 其他 Linux 发行版 | 满足上述运行条件的版本 | CLI 本体无固定架构限制。可用工具取决于架构和已安装的依赖。 |
+
+### WowType 拼音
+
+下表列出通过 `wo` 自动安装 WowType v0.4.0 的范围。Linux 上没有桌面会话时也可以安装软件包，输入源配置在登录桌面后完成。[上游软件包](https://github.com/Gloridust/WowType/releases/tag/v0.4.0)
+
+| 平台 | 系统版本 | 架构 |
+| --- | --- | --- |
+| macOS | 12 及以上 | Apple Silicon（arm64）、Intel（x86_64） |
+| Ubuntu | 22.04、24.04、26.04 LTS | amd64、arm64 |
+| Debian | 13 | amd64、arm64 |
+| deepin | 23、25 | amd64 |
+
+### 实测记录
+
+| 平台 | 架构 | wow-kit 本体的实测范围 |
+| --- | --- | --- |
+| Ubuntu 24.04.4 LTS（`mola`） | amd64 | 从 GitHub 提交归档安装，打开终端菜单，并在新登录会话验证 `wo`、`wow`、`wow-kit`。 |
+| macOS 27.2.1 | arm64 | 从本地检出安装和重复安装，验证三个入口及终端菜单。 |
+
+WowType 的安装和卸载在模拟的 Ubuntu 24.04（amd64）和 macOS（arm64）环境中验证过，真实桌面上的自动安装和输入源配置尚待实测。
 
 ## Cheatsheets
 
