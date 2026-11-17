@@ -56,32 +56,34 @@ source_dir=
 if [[ -n ${BASH_SOURCE[0]:-} && -f ${BASH_SOURCE[0]} ]]; then
     source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 fi
+bundle="$staging/bundle"
+mkdir "$bundle"
+files=(wow-kit/main.py wow-kit/ui.py wow-kit/actions.sh wow-kit/wowtype.sh scripts/install-omz.sh)
+
 if [[ -z $source_dir || ! -f $source_dir/wow-kit/main.py ]]; then
     ref=${WOW_KIT_REF:-main}
     case $ref in
         ""|*[!a-zA-Z0-9._/-]*) printf 'Invalid WOW_KIT_REF.\n' >&2; exit 2 ;;
     esac
-    url="https://codeload.github.com/sorelferris/awesome-scripts/tar.gz/$ref"
-    if command -v curl >/dev/null 2>&1; then
-        curl -q -fsSL --proto '=https' --proto-redir '=https' --retry 2 \
-            --connect-timeout 15 --max-time 180 "$url" -o "$staging/source.tar.gz"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -q "$url" -O "$staging/source.tar.gz"
-    else
+    url="https://raw.githubusercontent.com/sorelferris/awesome-scripts/$ref"
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
         printf 'Install curl or wget to download wow-kit.\n' >&2
         exit 1
     fi
-    source_dir="$staging/source"
-    mkdir "$source_dir"
-    tar -xzf "$staging/source.tar.gz" -C "$source_dir" --strip-components 1
+    for file in "${files[@]}"; do
+        output="$bundle/${file##*/}"
+        if command -v curl >/dev/null 2>&1; then
+            curl -q -fsSL --proto '=https' --proto-redir '=https' --retry 2 \
+                --connect-timeout 15 --max-time 60 "$url/$file" -o "$output"
+        else
+            wget -q --timeout=30 --tries=3 "$url/$file" -O "$output"
+        fi
+    done
+else
+    for file in "${files[@]}"; do
+        install -m 600 "$source_dir/$file" "$bundle/${file##*/}"
+    done
 fi
-
-bundle="$staging/bundle"
-mkdir "$bundle"
-for file in main.py ui.py actions.sh wowtype.sh; do
-    install -m 600 "$source_dir/wow-kit/$file" "$bundle/$file"
-done
-install -m 600 "$source_dir/scripts/install-omz.sh" "$bundle/install-omz.sh"
 cat > "$bundle/launcher" <<'LAUNCHER'
 #!/usr/bin/env bash
 set -e
