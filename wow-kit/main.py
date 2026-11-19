@@ -24,6 +24,7 @@ CATALOG = {
     "pixi": ("Pixi", "Package and environment manager"),
     "rust": ("Rust", "Rustup, Rust and Cargo"),
     "advcpmv": ("advcpmv", "cpg and mvg with progress, plus Zsh aliases"),
+    "mole": ("Mole", "Installs the macOS or Linux system maintenance toolkit"),
     "wowtype": ("WowType", "WowType Pinyin input method"),
 }
 ESSENTIALS = ("omz", "node", "conda", "uv")
@@ -62,7 +63,7 @@ class Kit:
         )
 
     def command(self, op, key, *args):
-        backend = "wowtype.sh" if key == "wowtype" else "actions.sh"
+        backend = {"wowtype": "wowtype.sh", "mole": "mole.sh"}.get(key, "actions.sh")
         return ["bash", str(HERE / backend), op, key, *args]
 
     def probe(self, op, key, *args):
@@ -148,8 +149,6 @@ class Kit:
             if self.plan(self.items(), keys, verb) != reviewed:
                 raise ValueError("The installed items changed since review. Run wow-kit to review the new plan.")
 
-            for action in reviewed:
-                print(action.label(), flush=True)
             needs_root = any(action.root for action in reviewed)
             stop = threading.Event()
             worker = None
@@ -160,19 +159,26 @@ class Kit:
 
             completed = []
             try:
-                for action in reviewed:
-                    print(f"\n==> {action.label()}", flush=True)
+                for position, action in enumerate(reviewed, start=1):
+                    label = action.label()
+                    print(f"\n[{position}/{len(reviewed)}] {label}", flush=True)
                     result = subprocess.run(self.command(action.verb, action.key),
                                             env=self.env, stdin=subprocess.DEVNULL)
                     if result.returncode:
-                        raise ValueError(f"{action.label()} failed (exit {result.returncode}). "
-                                         f"Completed: {', '.join(completed) or 'none'}.")
-                    completed.append(CATALOG[action.key][0])
+                        messages = [
+                            f"{label} failed (exit {result.returncode}).",
+                            "Completed   " + (", ".join(completed) or "None"),
+                        ]
+                        remaining = reviewed[position:]
+                        if remaining:
+                            messages.append("Not run     " + ", ".join(item.label() for item in remaining))
+                        raise ValueError("\n".join(messages))
+                    completed.append(label)
             finally:
                 stop.set()
                 if worker:
                     worker.join()
-            print("\nCompleted all selected actions.")
+            print(f"\nChanges completed   {len(completed)}/{len(reviewed)}")
             return 0
 
 
@@ -224,7 +230,18 @@ def list_items(items):
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="wow-kit", description="Install and remove everyday tools.")
+    if sys.argv[1:2] == ["update"]:
+        parser = argparse.ArgumentParser(prog="wow-kit update", description="Update wow-kit from GitHub main.")
+        parser.parse_args(sys.argv[2:])
+        from update import update_installed
+
+        return update_installed(HERE)
+
+    parser = argparse.ArgumentParser(
+        prog="wow-kit",
+        description="Install and remove everyday tools.",
+        epilog="Run 'wo update' to update wow-kit itself.",
+    )
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--list", action="store_true", help="list tools and their installed status")
     modes.add_argument("--install", nargs="+", metavar="ITEM",
@@ -259,9 +276,16 @@ def main():
 
     def describe_plan(keys):
         reviewed[:] = kit.plan(items, keys)
-        labels = [action.label() for action in reviewed]
+        if not reviewed:
+            raise ValueError("No changes to apply. Press Esc to revise the selection.")
+        installs = sum(action.verb == "install" for action in reviewed)
+        labels = [f"{installs} to install   {len(reviewed) - installs} to uninstall", ""]
+        labels.extend(action.label() if action.key in keys else f"{action.label()}  [Required]"
+                      for action in reviewed)
         if any(action.root for action in reviewed):
-            labels.append("Administrator access is required before starting.")
+            permissions = ("This plan needs pre-authorized sudo."
+                           if options.no_prompt else "Administrator authorization may be requested before starting.")
+            labels.extend(("", permissions))
         return labels
 
     try:

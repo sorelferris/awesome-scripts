@@ -5,7 +5,17 @@ if [[ ${1:-} == --help ]]; then
     printf 'Usage: bash install-wow-kit.sh [--launch]\n'
     exit 0
 fi
-if [[ $# -gt 1 || ( $# -eq 1 && $1 != --launch ) ]]; then
+mode=install
+revision=
+if [[ ${1:-} == --update ]]; then
+    if [[ $# != 3 || $2 != /* || ! $3 =~ ^[0-9a-f]{40}$ ]]; then
+        printf 'Invalid wow-kit update destination or revision.\n' >&2
+        exit 2
+    fi
+    mode=update
+    kit_dir=$2
+    revision=$3
+elif [[ $# -gt 1 || ( $# -eq 1 && $1 != --launch ) ]]; then
     printf 'Usage: bash install-wow-kit.sh [--launch]\n' >&2
     exit 2
 fi
@@ -23,34 +33,46 @@ if ! python3 -c 'import curses, fcntl, termios' >/dev/null 2>&1; then
 fi
 
 umask 077
-data_home=${XDG_DATA_HOME:-"$HOME/.local/share"}
-case $data_home in /*) ;; *) data_home="$HOME/.local/share" ;; esac
-data_home=$(python3 -c 'import os, sys; print(os.path.normpath(sys.argv[1]))' "$data_home")
-kit_dir="$data_home/wow-kit"
 bin_dir="$HOME/.local/bin"
-launcher="$kit_dir/current/launcher"
-mkdir -p "$kit_dir/versions" "$bin_dir"
+if [[ $mode == install ]]; then
+    data_home=${XDG_DATA_HOME:-"$HOME/.local/share"}
+    case $data_home in /*) ;; *) data_home="$HOME/.local/share" ;; esac
+    data_home=$(python3 -c 'import os, sys; print(os.path.normpath(sys.argv[1]))' "$data_home")
+    kit_dir="$data_home/wow-kit"
+    launcher="$kit_dir/current/launcher"
+    mkdir -p "$kit_dir/versions" "$bin_dir"
 
-for name in wo wow wow-kit; do
-    target="$bin_dir/$name"
-    if [[ -e $target || -L $target ]]; then
-        if [[ ! -L $target || $(readlink "$target") != "$launcher" ]]; then
-            printf 'The command path already exists: %s\n' "$target" >&2
+    for name in wo wow wow-kit; do
+        target="$bin_dir/$name"
+        if [[ -e $target || -L $target ]]; then
+            if [[ ! -L $target || $(readlink "$target") != "$launcher" ]]; then
+                printf 'The command path already exists: %s\n' "$target" >&2
+                exit 1
+            fi
+        fi
+        if existing=$(type -P "$name") && [[ $existing != "$target" ]]; then
+            printf 'The command %s already resolves to %s\n' "$name" "$existing" >&2
             exit 1
         fi
-    fi
-    if existing=$(type -P "$name") && [[ $existing != "$target" ]]; then
-        printf 'The command %s already resolves to %s\n' "$name" "$existing" >&2
+    done
+    if [[ -e $kit_dir/current && ! -L $kit_dir/current ]]; then
+        printf 'The wow-kit active bundle path already exists: %s\n' "$kit_dir/current" >&2
         exit 1
     fi
-done
-if [[ -e $kit_dir/current && ! -L $kit_dir/current ]]; then
-    printf 'The wow-kit active bundle path already exists: %s\n' "$kit_dir/current" >&2
+elif [[ ! -L $kit_dir/current || ! -d $kit_dir/versions || -L $kit_dir/versions ]]; then
+    printf 'The update destination is not an installed wow-kit bundle: %s\n' "$kit_dir" >&2
     exit 1
 fi
 
 staging=$(mktemp -d "${TMPDIR:-/tmp}/wow-kit-bootstrap.XXXXXXXX")
-trap 'rm -rf -- "$staging"' EXIT
+version=
+cleanup() {
+    rm -rf -- "$staging"
+    if [[ -n $version && ! "$kit_dir/current" -ef "$version" ]]; then
+        rm -rf -- "$version"
+    fi
+}
+trap cleanup EXIT
 
 source_dir=
 if [[ -n ${BASH_SOURCE[0]:-} && -f ${BASH_SOURCE[0]} ]]; then
@@ -58,13 +80,20 @@ if [[ -n ${BASH_SOURCE[0]:-} && -f ${BASH_SOURCE[0]} ]]; then
 fi
 bundle="$staging/bundle"
 mkdir "$bundle"
-files=(wow-kit/main.py wow-kit/ui.py wow-kit/actions.sh wow-kit/wowtype.sh scripts/install-omz.sh)
+files=(wow-kit/main.py wow-kit/ui.py wow-kit/update.py wow-kit/actions.sh wow-kit/mole.sh wow-kit/wowtype.sh scripts/install-omz.sh)
 
 if [[ -z $source_dir || ! -f $source_dir/wow-kit/main.py ]]; then
+    if [[ $mode == update ]]; then
+        printf 'A complete source checkout is required to update wow-kit.\n' >&2
+        exit 1
+    fi
     ref=${WOW_KIT_REF:-main}
     case $ref in
         ""|*[!a-zA-Z0-9._/-]*) printf 'Invalid WOW_KIT_REF.\n' >&2; exit 2 ;;
     esac
+    if [[ $ref =~ ^[0-9a-f]{40}$ ]]; then
+        revision=$ref
+    fi
     url="https://raw.githubusercontent.com/sorelferris/awesome-scripts/$ref"
     if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
         printf 'Install curl or wget to download wow-kit.\n' >&2
@@ -84,24 +113,48 @@ else
         install -m 600 "$source_dir/$file" "$bundle/${file##*/}"
     done
 fi
+if [[ -n $revision ]]; then
+    printf '%s\n' "$revision" > "$bundle/revision"
+fi
 cat > "$bundle/launcher" <<'LAUNCHER'
 #!/usr/bin/env bash
 set -e
 entry=$(readlink "$0") || entry=$0
-exec python3 "$(dirname "$entry")/main.py" "$@"
+bundle=$(cd -P -- "$(dirname -- "$entry")" && pwd -P)
+exec python3 "$bundle/main.py" "$@"
 LAUNCHER
 chmod 700 "$bundle/launcher"
+for script in "$bundle/"*.sh; do
+    bash -n "$script"
+done
+python3 - "$bundle" <<'PY'
+from pathlib import Path
+import sys
+
+for source in Path(sys.argv[1]).glob("*.py"):
+    try:
+        compile(source.read_bytes(), str(source), "exec")
+    except SyntaxError as error:
+        sys.exit(f"{source.name}:{error.lineno}: {error.msg}")
+PY
 python3 "$bundle/main.py" --help >/dev/null
 
 version=$(mktemp -d "$kit_dir/versions/bundle.XXXXXXXX")
 cp -p "$bundle/"* "$version/"
-python3 - "$kit_dir" "$version" "$bin_dir" <<'PY'
+python3 - "$kit_dir" "$version" "$bin_dir" "$mode" <<'PY'
 import os
 from pathlib import Path
 import sys
 
-kit, version, bin_dir = map(Path, sys.argv[1:])
+kit, version, bin_dir = map(Path, sys.argv[1:4])
+mode = sys.argv[4]
 current = kit / "current"
+if mode == "update":
+    active = current.resolve()
+    if (not current.is_symlink() or active.parent != (kit / "versions").resolve()
+            or not (active / "main.py").is_file() or not (active / "launcher").is_file()):
+        sys.exit(f"The update destination is not an installed wow-kit bundle: {kit}")
+
 temporary = kit / (".activate-" + version.name)
 temporary.symlink_to(version)
 try:
@@ -110,11 +163,17 @@ finally:
     if temporary.is_symlink():
         temporary.unlink()
 
-for name in ("wo", "wow", "wow-kit"):
-    path = bin_dir / name
-    if not path.is_symlink():
-        path.symlink_to(current / "launcher")
+if mode == "install":
+    for name in ("wo", "wow", "wow-kit"):
+        path = bin_dir / name
+        if not path.is_symlink():
+            path.symlink_to(current / "launcher")
 PY
+
+if [[ $mode == update ]]; then
+    printf 'Updated wow-kit to %.12s.\n' "$revision"
+    exit 0
+fi
 
 add_path() {
     local file=$1
